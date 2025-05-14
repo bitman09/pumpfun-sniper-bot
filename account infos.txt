@@ -1,0 +1,16 @@
+3 - pumpfun vault - 2tqNX1qrMT4J81wqvMUxNsGehpDHyLvpCQ9mkG5bmngj
+4 - creator token ata - 7enBju4DG7Uyuo3RkxA3xMdvVwzXP9AXRHoUJpqqMkKo
+5 - mint metaplex - A5emmqXHXGDLWRMytnWf7Gs5ScsNCARSUg3gvEZ4wYNt
+6 - pump fee - CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM
+7 - mint bonding curve - DLvbmQXwzrQMSoD3SDYbxq7WK6HHGhMEKrfL4riit5kW
+
+9 - pumpfun contract - 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+
+12 - pumpfun mint authority - TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM
+
+15 - ?????? - 4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf
+
+16 - ?????? - Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1
+
+
+buy amount(token/sol) - transaction.meta.innerinstructions[4].instructions[0/1]
