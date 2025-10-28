@@ -1,13 +1,9 @@
 import * as token from "@solana/spl-token";
 import * as web3 from "@solana/web3.js";
-import getBondingCurvePDA from "./getBondingCurvePDA";
-import tokenDataFromBondingCurveTokenAccBuffer from "./tokenDataFromBondingCurveTokenAccBuffer";
-import getBuyPrice from "./getBuyPrice";
 import { AnchorProvider, Program, Wallet } from "@coral-xyz/anchor";
 import { BN } from "bn.js";
 import { PumpFun } from "../idl/pump-fun";
 import IDL from "../idl/pump-fun.json";
-import getBondingCurveTokenAccountWithRetry from "./getBondingCurveTokenAccountWithRetry";
 import { SystemProgram, TransactionMessage } from "@solana/web3.js";
 import { executeJitoTx } from "../../executor/jito";
 import {
@@ -80,18 +76,10 @@ async function sellToken(
         await program.methods
           .sell(new BN(bigAmount.toString()), new BN("0"))
           .accounts({
+            associatedUser: associatedUser,
             feeRecipient: FEE_RECEIPT,
             mint: mint,
-            // @ts-ignore
-            bondingCurve: bondingCurveTokenAccount.publicKey,
-            associatedBondingCurve: associatedBondingCurve,
-            program: program.programId,
-            associatedUser: associatedUser,
-            user: keypair.publicKey,
-            systemProgram: SystemProgram.programId,
-            tokenProgram: token.TOKEN_PROGRAM_ID,
-            associatedTokenProgram: token.ASSOCIATED_TOKEN_PROGRAM_ID,
-            creatorVault: creatorVault,
+            user: keypair.publicKey
           })
           .transaction()
       )

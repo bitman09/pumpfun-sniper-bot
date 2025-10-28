@@ -1,6 +1,5 @@
 import * as token from "@solana/spl-token";
 import * as web3 from "@solana/web3.js";
-import getBondingCurvePDA from "./getBondingCurvePDA";
 import tokenDataFromBondingCurveTokenAccBuffer from "./tokenDataFromBondingCurveTokenAccBuffer";
 import getBuyPrice from "./getBuyPrice";
 import { AnchorProvider, Program, Wallet } from "@coral-xyz/anchor";
@@ -8,10 +7,8 @@ import { BN } from "bn.js";
 import { PumpFun } from "../idl/pump-fun";
 import IDL from "../idl/pump-fun.json";
 import getBondingCurveTokenAccountWithRetry from "./getBondingCurveTokenAccountWithRetry";
-import { SystemProgram, TransactionMessage } from "@solana/web3.js";
-import { executeJitoTx } from "../../executor/jito";
+import { SystemProgram } from "@solana/web3.js";
 import { BLOXROUTE_MODE, NEXT_BLOCK_API, NEXT_BLOCK_FEE, NEXTBLOCK_MODE, PRIORITY_FEE } from "../../constants";
-import { logger } from "../../utils";
 import { bloXroute_executeAndConfirm } from "../../executor/bloXroute";
 import { getCreatorVault } from "./getCreatorVault";
 
@@ -90,20 +87,12 @@ async function buyToken(
       .add(token.createAssociatedTokenAccountInstruction(keypair.publicKey, associatedUser, keypair.publicKey, mint))
       .add(
         await program.methods
-          .buy(new BN(buyAmountToken.toString()), new BN(buyAmountSolWithSlippage.toString()))
+          .buy(new BN(buyAmountToken.toString()), new BN(buyAmountSolWithSlippage.toString()), { "0": true })
           .accounts({
+            associatedUser: associatedUser,
             feeRecipient: FEE_RECEIPT,
             mint: mint,
-            // @ts-ignore
-            bondingCurve: bondingCurveTokenAccount.publicKey,
-            associatedBondingCurve: associatedBondingCurve,
-            program: program.programId,
-            associatedUser: associatedUser,
-            user: keypair.publicKey,
-            systemProgram: SystemProgram.programId,
-            tokenProgram: token.TOKEN_PROGRAM_ID,
-            associatedTokenProgram: token.ASSOCIATED_TOKEN_PROGRAM_ID,
-            creatorVault: creatorVault,
+            user: keypair.publicKey
           })
           .transaction()
       );
