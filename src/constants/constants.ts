@@ -1,4 +1,4 @@
-import { logger, retrieveEnvVariable } from "../utils"
+import { logger, retrieveEnvVariable, retrieveOptionalEnvNumber } from "../utils"
 import { PublicKey } from "@metaplex-foundation/js";
 import { bool, struct, u64 } from "@raydium-io/raydium-sdk";
 
@@ -8,6 +8,7 @@ export const RPC_WEBSOCKET_ENDPOINT = retrieveEnvVariable('RPC_WEBSOCKET_ENDPOIN
 export const GEYSER_RPC = retrieveEnvVariable('GEYSER_RPC', logger)
 
 export const BUY_AMOUNT = Number(retrieveEnvVariable('BUY_AMOUNT', logger));
+export const SIMULATION_MODE = retrieveEnvVariable('SIMULATION_MODE', logger) === 'true'
 
 export const TAKE_PROFIT = Number(retrieveEnvVariable('TAKE_PROFIT', logger))
 export const STOP_LOSS = Number(retrieveEnvVariable('STOP_LOSS', logger))
@@ -20,7 +21,8 @@ export const MARKET_CAP = Number(retrieveEnvVariable('MARKET_CAP', logger))
 // export const POSITION_NUMBER = Number(retrieveEnvVariable('POSITION_NUMBER', logger))
 
 export const CHECK_DEV_BUY = retrieveEnvVariable('CHECK_DEV_BUY', logger) === 'true'
-export const MAX_DEV_BUY_AMOUNT = Number(retrieveEnvVariable('MAX_DEV_BUY_AMOUNT', logger))
+export const MIN_DEV_BUY_AMOUNT = retrieveOptionalEnvNumber('MIN_DEV_BUY_AMOUNT', 0)
+export const MAX_DEV_BUY_AMOUNT = retrieveOptionalEnvNumber('MAX_DEV_BUY_AMOUNT', Infinity)
 
 export const CHECK_X = retrieveEnvVariable('CHECK_X', logger) === 'true'
 export const CHECK_WEBSITE = retrieveEnvVariable('CHECK_WEBSITE', logger) === 'true'

@@ -3,15 +3,15 @@ import wait from "./wait";
 export default async function getBondingCurveTokenAccountWithRetry(
   connection: web3.Connection,
   bondingCurve: web3.PublicKey,
-  maxRetries = 20,
-  retryDelay = 10
+  maxRetries = 30,
+  retryDelay = 50
 ) {
   let accountInfo: web3.AccountInfo<Buffer> | null = null;
   let retries = 0;
 
   while (retries < maxRetries) {
     try {
-      accountInfo = await connection.getAccountInfo(bondingCurve);
+      accountInfo = await connection.getAccountInfo(bondingCurve, "processed");
       if (accountInfo) break;
     } catch (error) {
       console.error("Failed to get account info:", error);

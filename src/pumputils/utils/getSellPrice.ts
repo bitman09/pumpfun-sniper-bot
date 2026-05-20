@@ -5,7 +5,12 @@ import tokenDataFromBondingCurveTokenAccBuffer from "./tokenDataFromBondingCurve
 
 const BOANDING_CURVE_ACC_RETRY_AMOUNT = 5;
 
-export const getSellPrice = async (connection: Connection, bondingCurve: PublicKey, slippage: number, tokenAmount: number) => {
+export const getSellPrice = async (
+    connection: Connection,
+    bondingCurve: PublicKey,
+    slippage: number,
+    tokenAmount: string | number | bigint
+) => {
     const bondingCurveTokenAccount = await getBondingCurveTokenAccountWithRetry(
         connection,
         bondingCurve,
@@ -18,7 +23,7 @@ export const getSellPrice = async (connection: Connection, bondingCurve: PublicK
     const tokenData = tokenDataFromBondingCurveTokenAccBuffer(bondingCurveTokenAccount!.data);
 
     const SLIPAGE_POINTS = BigInt(slippage * 100);
-    const tokenAmountLam = BigInt(tokenAmount);
+    const tokenAmountLam = typeof tokenAmount === "bigint" ? tokenAmount : BigInt(tokenAmount);
     const solOutAmount = await getTokenOut(tokenAmountLam, 100n, tokenData);
     return Number(solOutAmount) / LAMPORTS_PER_SOL
 }

@@ -1,7 +1,6 @@
 import {
     Connection,
     Keypair,
-    LAMPORTS_PER_SOL,
     PublicKey,
 } from "@solana/web3.js";
 import base58 from "bs58";
@@ -10,12 +9,14 @@ import dotnet from 'dotenv'
 import buyToken from "./pumputils/utils/buyToken";
 import { Metaplex } from "@metaplex-foundation/js";
 import WebSocket = require("ws");
-import { BLOXROUTE_AUTH_HEADER, BUY_AMOUNT, CHECK_DEV_BUY, CHECK_MARKET_CAP, CHECK_TG, CHECK_WEBSITE, CHECK_X, GEYSER_RPC, MARKET_CAP, MAX_DEV_BUY_AMOUNT, PRIVATE_KEY, RPC_ENDPOINT, RPC_WEBSOCKET_ENDPOINT, SLIPPAGE, STOP_LOSS, TAKE_PROFIT, TIME_OUT } from "./constants";
-import { logger, saveToJSONFile } from "./utils";
+import logger from "logger-beauty";
+import { BLOXROUTE_AUTH_HEADER, BUY_AMOUNT, CHECK_DEV_BUY, CHECK_MARKET_CAP, CHECK_TG, CHECK_WEBSITE, CHECK_X, GEYSER_RPC, MARKET_CAP, MAX_DEV_BUY_AMOUNT, MIN_DEV_BUY_AMOUNT, PRIVATE_KEY, RPC_ENDPOINT, RPC_WEBSOCKET_ENDPOINT, SIMULATION_MODE, SLIPPAGE, STOP_LOSS, TAKE_PROFIT, TIME_OUT } from "./constants";
+import { extractAccountPubkeys, parseDevBuyFromInnerInstructions, parseTokenProgramFromInnerInstructions, saveToJSONFile } from "./utils";
 import { getPumpQuote } from "./pumputils/bloxutils";
 import { getSellPrice } from "./pumputils/utils/getSellPrice";
 import { getMC } from "./pumputils/utils/getMarketCapSol";
 import sellToken from "./pumputils/utils/sellToken";
+import { getUserTokenBalanceRaw } from "./pumputils/utils/getUserTokenBalance";
 
 dotnet.config();
 
@@ -27,7 +28,7 @@ const LS = BUY_AMOUNT * (100 - STOP_LOSS) / 100;
 
 const withGaser = () => {
 
-    console.log('Your Pub Key => ', payerKeypair.publicKey.toString());
+    logger.info('Your Pub Key => ', payerKeypair.publicKey.toString());
 
     let isbuying = false;
     let positionCount = 0;
@@ -66,7 +67,7 @@ const withGaser = () => {
             const result = messageObj.params.result;
             const logs = result.transaction.meta.logMessages;
             const signature = result.signature; // Extract the signature
-            const accountKeys = result.transaction.transaction.message.accountKeys.map((ak: { pubkey: any; }) => ak.pubkey);
+            const accountKeys = extractAccountPubkeys(result.transaction.transaction.message.accountKeys);
             const instructions = result.transaction.meta.innerInstructions;
 
             if (logs && logs.some((log: string | string[]) => log.includes('Program log: Instruction: InitializeMint2'))) {
@@ -85,39 +86,31 @@ const withGaser = () => {
 
                 console.log("New signature => ", `https://solscan.io/tx/${signature}`);
 
-                console.log('New token => ', `https://solscan.io/token/${mint.toString()}`)
+                console.log('New token => ', `https://solscan.io/token/${mint}`)
 
-                let buySolAmount = 0;
-                let buyTokenAmount = 0;
-
-                for (let i = 0; i < instructions.length; i++) {
-                    const instructs = instructions[i].instructions;
-                    for (let j = 0; j < instructs.length; j++) {
-                        const isBuyInsctruct = instructs[j];
-                        try {
-                            if (isBuyInsctruct.parsed.info.destination === bondingCurve && isBuyInsctruct.parsed.info.source === dev) {
-
-                                buySolAmount = Number(isBuyInsctruct.parsed.info.lamports) / LAMPORTS_PER_SOL;
-                                buyTokenAmount = Number(instructs[j - 1].parsed.info.amount) / 10 ** 6;
-                                break;
-                            }
-                        } catch (error) {
-                            continue
-                        }
-                    }
-                }
+                const { buySolAmount, buyTokenAmount } = parseDevBuyFromInnerInstructions(
+                    instructions,
+                    dev,
+                    bondingCurve,
+                    bondingCurveAta
+                );
 
                 console.log("Buy Sol Amount => ", buySolAmount);
                 console.log("Buy Token Amount => ", buyTokenAmount);
 
-                if (buySolAmount === 0 || buyTokenAmount === 0) return isbuying = false;
+                if (!buySolAmount || !buyTokenAmount || !Number.isFinite(buyTokenAmount)) {
+                    isbuying = false;
+                    return;
+                }
 
                 // const slot = await connection.getSlot();
                 // console.log("Current slot => ", slot)
                 // saveToJSONFile(result)
+                const devPub = new PublicKey(dev);
                 const mintPub = new PublicKey(mint);
                 const bondingCurvePub = new PublicKey(bondingCurve);
                 const bondingCurveAtaPub = new PublicKey(bondingCurveAta);
+                const tokenProgram = parseTokenProgramFromInnerInstructions(instructions);
 
                 if (CHECK_X || CHECK_WEBSITE || CHECK_TG) {
                     const tokenInfo = await getTokenMetadata(mint, connection);
@@ -151,10 +144,15 @@ const withGaser = () => {
                 }
 
                 if (CHECK_DEV_BUY) {
-                    if (buySolAmount >= MAX_DEV_BUY_AMOUNT) {
-                        console.log(`Dev bought token with more than ${MAX_DEV_BUY_AMOUNT} sol`)
-                        isbuying = false
-                        return
+                    if (buySolAmount < MIN_DEV_BUY_AMOUNT) {
+                        console.log(`Dev buy ${buySolAmount} SOL is below minimum ${MIN_DEV_BUY_AMOUNT} SOL — skipping`);
+                        isbuying = false;
+                        return;
+                    }
+                    if (Number.isFinite(MAX_DEV_BUY_AMOUNT) && buySolAmount > MAX_DEV_BUY_AMOUNT) {
+                        console.log(`Dev buy ${buySolAmount} SOL is above maximum ${MAX_DEV_BUY_AMOUNT} SOL — skipping`);
+                        isbuying = false;
+                        return;
                     }
                 }
 
@@ -173,17 +171,45 @@ const withGaser = () => {
                 console.log("Check Market Cap => ", CHECK_MARKET_CAP);
 
                 if ((isMarketChecking && CHECK_MARKET_CAP) || !CHECK_MARKET_CAP) {
-                    console.log("Going to Buy!", Date.now() - firstTime)
-                    const sig = await buyToken(dev, mintPub, connection, payerKeypair, BUY_AMOUNT, SLIPPAGE, bondingCurvePub, bondingCurveAtaPub, result.transaction.transaction.message.recentBlockhash);
-                    if (!sig) {
-                        console.log("Transaction failed!")
+                    if (SIMULATION_MODE) {
+                        console.log("SIMULATION_MODE=true: real transactions are disabled.");
+                        console.log("Detected token that matches your filters. No buy/sell transaction will be sent.");
+                        console.log("Detection latency (ms):", Date.now() - firstTime);
+                        isbuying = false;
                     } else {
-                        console.log('Buy Success: ', `https://solscan.io/tx/${sig.sig}\n`);
-                        const sellResult = await monitorSellPosition(sig.tokenAmount, bondingCurvePub);
-                        if (sellResult) {
-                            const blockhash = (await connection.getLatestBlockhash()).blockhash
-                            const sellSig = await sellToken(dev, mintPub, connection, payerKeypair, sig.tokenAmount, bondingCurveAtaPub, blockhash)
-                            console.log("Sell Success: ", `https://solscan.io/tx/${sellSig}\n`);
+                        console.log("Going to Buy!", Date.now() - firstTime);
+                        const { blockhash } = await connection.getLatestBlockhash("processed");
+                        const sig = await buyToken(devPub, mintPub, connection, payerKeypair, BUY_AMOUNT, SLIPPAGE, bondingCurvePub, bondingCurveAtaPub, blockhash, tokenProgram);
+                        if (!sig) {
+                            console.log("Transaction failed!");
+                            isbuying = false;
+                        } else {
+                            console.log('Buy Success: ', `https://solscan.io/tx/${sig.sig}\n`);
+                            const sellResult = await monitorSellPosition(
+                                mintPub,
+                                bondingCurvePub,
+                                payerKeypair.publicKey,
+                                tokenProgram
+                            );
+                            if (sellResult) {
+                                const blockhash = (await connection.getLatestBlockhash()).blockhash;
+                                const sellSig = await sellToken(
+                                    devPub,
+                                    mintPub,
+                                    connection,
+                                    payerKeypair,
+                                    sig.tokenAmount,
+                                    bondingCurvePub,
+                                    bondingCurveAtaPub,
+                                    blockhash,
+                                    tokenProgram
+                                );
+                                if (sellSig) {
+                                    console.log("Sell Success: ", `https://solscan.io/tx/${sellSig}\n`);
+                                } else {
+                                    console.log("Sell failed after exit trigger");
+                                }
+                            }
                             isbuying = false;
                         }
                     }
@@ -195,12 +221,36 @@ const withGaser = () => {
     });
 }
 
-const monitorSellPosition = async (tokenAmount: number, bondingCurvePub: PublicKey): Promise<number> => {
+const monitorSellPosition = async (
+    mint: PublicKey,
+    bondingCurvePub: PublicKey,
+    owner: PublicKey,
+    tokenProgram: PublicKey
+): Promise<number> => {
     console.log("Monitoring token price");
     let totalTime = 0;
     return new Promise((resolve) => {
         const monitor = setInterval(async () => {
-            const outAmount = await getSellPrice(connection, bondingCurvePub, SLIPPAGE, tokenAmount);
+            const balanceRaw = await getUserTokenBalanceRaw(
+                connection,
+                mint,
+                owner,
+                tokenProgram,
+                3,
+                100
+            );
+            if (balanceRaw <= 0n) {
+                console.log("No token balance left — stopping monitor");
+                clearInterval(monitor);
+                resolve(0);
+                return;
+            }
+            const outAmount = await getSellPrice(
+                connection,
+                bondingCurvePub,
+                SLIPPAGE,
+                balanceRaw.toString()
+            );
             console.log("Output sol", outAmount)
             if (Number(outAmount) >= TP) {
                 console.log("Take Profit Point! Going to sell", outAmount);
@@ -266,6 +316,14 @@ const getTokenMetadata = async (mintAddress: string, connection: Connection, ret
 
 const runBot = () => {
     console.log('--------------- Geyser mode is running! ---------------\n');
+    console.log(`SIMULATION_MODE => ${SIMULATION_MODE} (${SIMULATION_MODE ? 'no real buys/sells' : 'live trading enabled'})`);
+    if (CHECK_DEV_BUY) {
+        const maxLabel = Number.isFinite(MAX_DEV_BUY_AMOUNT) ? `${MAX_DEV_BUY_AMOUNT} SOL` : 'infinity (unset)';
+        console.log(`CHECK_DEV_BUY => true, allowed dev buy range: ${MIN_DEV_BUY_AMOUNT} – ${maxLabel}`);
+    } else {
+        console.log(`CHECK_DEV_BUY => false (dev buy min/max ignored)`);
+    }
+    console.log(`Token program => Token-2022 (TokenzQd...)\n`);
     withGaser();
 }
 

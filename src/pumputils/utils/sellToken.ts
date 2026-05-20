@@ -4,25 +4,65 @@ import { AnchorProvider, Program, Wallet } from "@coral-xyz/anchor";
 import { BN } from "bn.js";
 import { PumpFun } from "../idl/pump-fun";
 import IDL from "../idl/pump-fun.json";
-import { SystemProgram, TransactionMessage } from "@solana/web3.js";
-import { executeJitoTx } from "../../executor/jito";
+import { SystemProgram } from "@solana/web3.js";
 import {
   BLOXROUTE_MODE,
   NEXT_BLOCK_API,
   NEXT_BLOCK_FEE,
   NEXTBLOCK_MODE,
   PRIORITY_FEE,
+  SLIPPAGE,
 } from "../../constants";
-import { logger } from "../../utils";
 import { bloXroute_executeAndConfirm } from "../../executor/bloXroute";
+import bs58 from "bs58";
+import { confirmSignature, resolvePumpTokenProgram } from "./transactionUtils";
+import {
+  getAssociatedBondingCurveAta,
+  getPumpFeeRecipient,
+  getPumpSellRemainingAccounts,
+} from "./pumpAccounts";
 import { getCreatorVault } from "./getCreatorVault";
+import getBondingCurveTokenAccountWithRetry from "./getBondingCurveTokenAccountWithRetry";
+import tokenDataFromBondingCurveTokenAccBuffer from "./tokenDataFromBondingCurveTokenAccBuffer";
+import { getTokenOut } from "./getSellPrice";
+import { getUserTokenBalanceRaw } from "./getUserTokenBalance";
 
-interface Payload {
-  transaction: TransactionMessages;
-}
+async function submitAndConfirm(
+  connection: web3.Connection,
+  transaction: web3.Transaction,
+  keypair: web3.Keypair
+): Promise<string | false> {
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("processed");
+  transaction.recentBlockhash = blockhash;
+  transaction.feePayer = keypair.publicKey;
+  transaction.sign(keypair);
 
-interface TransactionMessages {
-  content: string;
+  const signature = bs58.encode(transaction.signature!);
+  const response = await fetch("https://fra.nextblock.io/api/v2/submit", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      authorization: NEXT_BLOCK_API,
+    },
+    body: JSON.stringify({
+      transaction: { content: transaction.serialize().toString("base64") },
+    }),
+  });
+
+  const responseData = await response.json();
+  if (!response.ok) {
+    console.error("Failed to send sell transaction:", response.status, responseData);
+    return false;
+  }
+
+  const confirmed = await confirmSignature(connection, signature);
+  if (!confirmed) {
+    const status = await connection.getSignatureStatus(signature);
+    console.error("Sell transaction failed on-chain:", signature, status.value?.err ?? "timeout");
+    return false;
+  }
+
+  return signature;
 }
 
 async function sellToken(
@@ -30,159 +70,150 @@ async function sellToken(
   mint: web3.PublicKey,
   connection: web3.Connection,
   keypair: web3.Keypair,
-  soloutAmount: number,
-  associatedBondingCurve: web3.PublicKey,
-  blockhash: string
+  _tokenAmount: string | number,
+  bondingCurve: web3.PublicKey,
+  _associatedBondingCurveFromGeyser: web3.PublicKey,
+  _blockhash: string,
+  tokenProgramHint?: web3.PublicKey
 ) {
   try {
-    // Load Pumpfun provider
     const provider = new AnchorProvider(connection, new Wallet(keypair), {
       commitment: "processed",
     });
     const program = new Program<PumpFun>(IDL as PumpFun, provider);
-
-    // Create transaction
     const transaction = new web3.Transaction();
 
-    // Get/Create token account
+    const mintTokenProgram = resolvePumpTokenProgram(tokenProgramHint);
+    const associatedBondingCurve = getAssociatedBondingCurveAta(
+      mint,
+      bondingCurve,
+      mintTokenProgram
+    );
     const associatedUser = token.getAssociatedTokenAddressSync(
       mint,
       keypair.publicKey,
-      false
+      false,
+      mintTokenProgram
     );
 
-    const FEE_RECEIPT = new web3.PublicKey(
-      "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM"
+    const sellAmount = await getUserTokenBalanceRaw(
+      connection,
+      mint,
+      keypair.publicKey,
+      mintTokenProgram
     );
 
+    if (sellAmount <= 0n) {
+      console.error("Sell skipped: wallet token balance is 0");
+      return false;
+    }
+
+    console.log(`Selling ${sellAmount.toString()} raw tokens (actual wallet balance)`);
+
+    const bondingCurveAccount = await getBondingCurveTokenAccountWithRetry(
+      connection,
+      bondingCurve,
+      30,
+      50
+    );
+    const tokenData = tokenDataFromBondingCurveTokenAccBuffer(bondingCurveAccount.data);
+
+    const slippagePoints = BigInt(Math.floor(SLIPPAGE * 100));
+    const expectedSol = await getTokenOut(sellAmount, 100n, tokenData);
+    const minSolOut =
+      expectedSol - (expectedSol * slippagePoints) / 10000n;
+
+    const feeRecipient = await getPumpFeeRecipient(program);
     const creatorVault = await getCreatorVault(dev, program.programId);
 
-    // request a specific compute unit budget
     const modifyComputeUnits = web3.ComputeBudgetProgram.setComputeUnitLimit({
-      units: 70_000,
+      units: 250_000,
     });
-
-    // set the desired priority fee
     const addPriorityFee = web3.ComputeBudgetProgram.setComputeUnitPrice({
-      microLamports: Math.floor(((PRIORITY_FEE * 10 ** 9) / 70_000) * 10 ** 6),
+      microLamports: Math.floor(((PRIORITY_FEE * 10 ** 9) / 250_000) * 10 ** 6),
     });
-
-    const bigAmount = BigInt(soloutAmount);
 
     transaction
       .add(modifyComputeUnits)
       .add(addPriorityFee)
       .add(
         await program.methods
-          .sell(new BN(bigAmount.toString()), new BN("0"))
-          .accounts({
-            associatedUser: associatedUser,
-            feeRecipient: FEE_RECEIPT,
-            mint: mint,
-            user: keypair.publicKey
+          .sell(new BN(sellAmount.toString()), new BN(minSolOut.toString()))
+          .accountsPartial({
+            associatedUser,
+            feeRecipient,
+            mint,
+            user: keypair.publicKey,
+            tokenProgram: mintTokenProgram,
+            bondingCurve,
+            associatedBondingCurve,
+            creatorVault,
           })
+          .remainingAccounts(getPumpSellRemainingAccounts(mint))
           .transaction()
       )
       .add(
         token.createCloseAccountInstruction(
           associatedUser,
           keypair.publicKey,
-          keypair.publicKey
+          keypair.publicKey,
+          [],
+          mintTokenProgram
         )
       );
 
-    transaction.feePayer = keypair.publicKey;
-    transaction.recentBlockhash = blockhash;
-
     if (NEXTBLOCK_MODE) {
-      const next_block_addrs = [
-        "NEXTbLoCkB51HpLBLojQfpyVAMorm3zzKg7w9NFdqid",
-        // 'NeXTBLoCKs9F1y5PJS9CKrFNNLU1keHW71rfh7KgA1X',
-        // 'NexTBLockJYZ7QD7p2byrUa6df8ndV2WSd8GkbWqfbb',
-        // 'neXtBLock1LeC67jYd1QdAa32kbVeubsfPNTJC1V5At',
-        // 'nEXTBLockYgngeRmRrjDV31mGSekVPqZoMGhQEZtPVG',
-        // 'nextBLoCkPMgmG8ZgJtABeScP35qLa2AMCNKntAP7Xc',
-        // 'NextbLoCkVtMGcV47JzewQdvBpLqT9TxQFozQkN98pE',
-        // 'NexTbLoCkWykbLuB1NkjXgFWkX9oAtcoagQegygXXA2'
-      ];
-
-      for (let i = 0; i < next_block_addrs.length; i++) {
-        const next_block_addr = next_block_addrs[i];
-
-        if (!next_block_addr)
-          return console.log("Nextblock wallet is not provided");
-        if (!NEXT_BLOCK_API)
-          return console.log("Nextblock block api is not provided");
-
-        // NextBlock Instruction
-        const recipientPublicKey = new web3.PublicKey(next_block_addr);
-        const transferInstruction = SystemProgram.transfer({
-          fromPubkey: keypair.publicKey,
-          toPubkey: recipientPublicKey,
-          lamports: NEXT_BLOCK_FEE * web3.LAMPORTS_PER_SOL,
-        });
-
-        transaction.add(transferInstruction);
-
-        transaction.sign(keypair);
-
-        const tx64Str = transaction.serialize().toString("base64");
-        const payload: Payload = {
-          transaction: {
-            content: tx64Str,
-          },
-        };
-
-        try {
-          const response = await fetch(
-            "https://fra.nextblock.io/api/v2/submit",
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                authorization: NEXT_BLOCK_API, // Insert your authorization token here
-              },
-              body: JSON.stringify(payload),
-            }
-          );
-
-          const responseData = await response.json();
-
-          if (response.ok) {
-            return transaction.signature?.toString();
-          } else {
-            console.error(
-              "Failed to send transaction:",
-              response.status,
-              responseData
-            );
-            return false;
-          }
-        } catch (error) {
-          console.error("Error sending transaction:", error);
-          return false;
-        }
-      }
-    } else if (BLOXROUTE_MODE) {
-      const result = await bloXroute_executeAndConfirm(transaction, keypair);
-      if (result) {
-        return result;
-      } else {
+      const nextBlockAddr = "NEXTbLoCkB51HpLBLojQfpyVAMorm3zzKg7w9NFdqid";
+      if (!NEXT_BLOCK_API) {
+        console.log("Nextblock API is not provided");
         return false;
       }
-    } else {
-      const txSig = await connection.sendTransaction(transaction, [keypair]);
-      const confirmSig = await connection.confirmTransaction(
-        txSig,
-        "confirmed"
+
+      transaction.add(
+        SystemProgram.transfer({
+          fromPubkey: keypair.publicKey,
+          toPubkey: new web3.PublicKey(nextBlockAddr),
+          lamports: NEXT_BLOCK_FEE * web3.LAMPORTS_PER_SOL,
+        })
       );
 
-      if (!confirmSig.value.err) {
-        return false;
-      } else {
-        return txSig;
-      }
+      return submitAndConfirm(connection, transaction, keypair);
     }
+
+    if (BLOXROUTE_MODE) {
+      const { blockhash } = await connection.getLatestBlockhash("processed");
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = keypair.publicKey;
+      const result = await bloXroute_executeAndConfirm(transaction, keypair);
+      if (!result) return false;
+      const ok = await confirmSignature(connection, result);
+      if (!ok) {
+        console.error("Sell transaction failed on-chain:", result);
+        return false;
+      }
+      return result;
+    }
+
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("processed");
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = keypair.publicKey;
+    transaction.sign(keypair);
+
+    const txSig = await connection.sendRawTransaction(transaction.serialize(), {
+      skipPreflight: false,
+      maxRetries: 2,
+    });
+    const confirmSig = await connection.confirmTransaction(
+      { signature: txSig, blockhash, lastValidBlockHeight },
+      "confirmed"
+    );
+
+    if (confirmSig.value.err) {
+      console.error("Sell transaction failed on-chain:", txSig, confirmSig.value.err);
+      return false;
+    }
+
+    return txSig;
   } catch (error) {
     console.error(error);
     return false;

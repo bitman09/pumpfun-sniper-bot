@@ -13,6 +13,23 @@ export const retrieveEnvVariable = (variableName: string, logger: Logger) => {
   return variable;
 };
 
+/** Returns defaultValue when env is empty, whitespace, or "unset"/"none". */
+export const retrieveOptionalEnvNumber = (
+  variableName: string,
+  defaultValue: number
+): number => {
+  const raw = (process.env[variableName] ?? '').trim();
+  if (!raw || ['unset', 'none', 'infinity', 'inf'].includes(raw.toLowerCase())) {
+    return defaultValue;
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    console.log(`${variableName} is not a valid number: "${raw}"`);
+    process.exit(1);
+  }
+  return value;
+};
+
 export const strToArr = (str: string) => {
   const validJsonString = str.replace(/'/g, '"');
   const arr = JSON.parse(validJsonString);
