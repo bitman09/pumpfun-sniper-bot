@@ -1,6 +1,6 @@
 # Pump.fun Sniper
 
-A low-latency Solana bot that watches **Pump.fun** token launches in real time over a **Geyser** WebSocket feed, applies configurable filters, buys on the bonding curve, and exits automatically via take-profit, stop-loss, or timeout.
+A low-latency Solana Pumpfun Sniper bot that watches **Pump.fun** token launches in real time over a **Geyser** WebSocket feed, applies configurable filters, buys on the bonding curve, and exits automatically via take-profit, stop-loss, or timeout.
 
 Built with TypeScript, Anchor, and the official Pump.fun program IDL. Supports **Token-2022** mints (including transfer-fee harvest on cleanup).
 
