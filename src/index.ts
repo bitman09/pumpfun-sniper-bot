@@ -9,7 +9,7 @@ import dotnet from 'dotenv'
 import buyToken from "./pumputils/utils/buyToken";
 import { Metaplex } from "@metaplex-foundation/js";
 import WebSocket = require("ws");
-import logger from "logger-beauty";
+import logger from "pretty-pino-loggers";
 import { BLOXROUTE_AUTH_HEADER, BUY_AMOUNT, CHECK_DEV_BUY, CHECK_MARKET_CAP, CHECK_TG, CHECK_WEBSITE, CHECK_X, GEYSER_RPC, MARKET_CAP, MAX_DEV_BUY_AMOUNT, MIN_DEV_BUY_AMOUNT, PRIVATE_KEY, RPC_ENDPOINT, RPC_WEBSOCKET_ENDPOINT, SIMULATION_MODE, SLIPPAGE, STOP_LOSS, TAKE_PROFIT, TIME_OUT } from "./constants";
 import { extractAccountPubkeys, parseDevBuyFromInnerInstructions, parseTokenProgramFromInnerInstructions, saveToJSONFile } from "./utils";
 import { getPumpQuote } from "./pumputils/bloxutils";
