@@ -10,6 +10,17 @@ export const GEYSER_RPC = retrieveEnvVariable('GEYSER_RPC', logger)
 export const BUY_AMOUNT = Number(retrieveEnvVariable('BUY_AMOUNT', logger));
 export const SIMULATION_MODE = retrieveEnvVariable('SIMULATION_MODE', logger) === 'true'
 
+/** sol | usdc | both — which quote pools to snipe */
+export const SNIPE_QUOTE_MODE = (process.env.SNIPE_QUOTE_MODE ?? 'sol').trim().toLowerCase()
+export const USDC_MINT = new PublicKey(
+  (process.env.USDC_MINT ?? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v').trim()
+)
+export const USDC_DECIMALS = 6
+export const BUY_AMOUNT_USDC = Number(process.env.BUY_AMOUNT_USDC ?? process.env.BUY_AMOUNT ?? '10')
+export const MARKET_CAP_USDC = Number(process.env.MARKET_CAP_USDC ?? '4000')
+export const MIN_DEV_BUY_AMOUNT_USDC = retrieveOptionalEnvNumber('MIN_DEV_BUY_AMOUNT_USDC', 0)
+export const MAX_DEV_BUY_AMOUNT_USDC = retrieveOptionalEnvNumber('MAX_DEV_BUY_AMOUNT_USDC', Infinity)
+
 export const TAKE_PROFIT = Number(retrieveEnvVariable('TAKE_PROFIT', logger))
 export const STOP_LOSS = Number(retrieveEnvVariable('STOP_LOSS', logger))
 export const TIME_OUT = Number(retrieveEnvVariable('TIME_OUT', logger))
@@ -28,9 +39,9 @@ export const CHECK_X = retrieveEnvVariable('CHECK_X', logger) === 'true'
 export const CHECK_WEBSITE = retrieveEnvVariable('CHECK_WEBSITE', logger) === 'true'
 export const CHECK_TG = retrieveEnvVariable('CHECK_TG', logger) === 'true'
 
-// Fee configs
-// export const JITO_MODE = retrieveEnvVariable('JITO_MODE', logger) === 'true'
-// export const JITO_FEE = Number(retrieveEnvVariable('JITO_FEE', logger))
+// Fee configs (optional — jito helper only)
+export const JITO_MODE = (process.env.JITO_MODE ?? 'false').trim() === 'true'
+export const JITO_FEE = Number(process.env.JITO_FEE ?? '0.0001')
 
 export const NEXTBLOCK_MODE = retrieveEnvVariable('NEXTBLOCK_MODE', logger) === 'true'
 export const NEXT_BLOCK_API = retrieveEnvVariable('NEXT_BLOCK_API', logger)

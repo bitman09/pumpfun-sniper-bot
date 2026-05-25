@@ -63,6 +63,7 @@ Detection latency is logged in milliseconds (`Date.now() - firstTime` at buy tim
 | Area | Capability |
 |------|------------|
 | **Speed** | Geyser `processed` commitment — reacts before typical polling RPC |
+| **Quote pools** | SOL and **USDC** bonding-curve pairs (`SNIPE_QUOTE_MODE`) via Pump `buy_v2` / `sell_v2` |
 | **Safety** | `SIMULATION_MODE` — full pipeline without sending transactions |
 | **Filters** | Dev buy min/max, market cap gate, X / Telegram / website validation |
 | **Risk** | Take-profit %, stop-loss %, position timeout (seconds) |
@@ -83,7 +84,7 @@ Detection latency is logged in milliseconds (`Date.now() - firstTime` at buy tim
   - [NextBlock](https://nextblock.io/) API key (`NEXT_BLOCK_API`)
   - [bloXroute](https://bloxroute.com/) auth header
 
-You need enough SOL for buys, priority / tip fees, and rent for new ATAs.
+You need enough **SOL** for transaction fees, priority tips, and rent. For USDC pool snipes, your wallet also needs sufficient **USDC** (SPL) balance plus a USDC ATA (created automatically on first buy).
 
 ---
 
@@ -133,18 +134,31 @@ Copy `.env.example` to `.env`. All variables below are read at startup; missing 
 | `RPC_WEBSOCKET_ENDPOINT` | Yes | WebSocket RPC URL |
 | `GEYSER_RPC` | Yes | Geyser WebSocket URL (e.g. `wss://atlas-mainnet.helius-rpc.com/?api-key=...`) |
 
+### Quote pool mode
+
+| Variable | Default (example) | Description |
+|----------|-------------------|-------------|
+| `SNIPE_QUOTE_MODE` | `both` | `sol` = SOL pairs only, `usdc` = USDC pairs only, `both` = snipe either |
+| `USDC_MINT` | `EPjFW...` | Mainnet USDC mint (change only for custom deployments) |
+| `BUY_AMOUNT_USDC` | `10` | USDC spent per USDC-pool snipe |
+| `MARKET_CAP_USDC` | `4000` | Market cap threshold in USDC when `CHECK_MARKET_CAP=true` |
+| `MIN_DEV_BUY_AMOUNT_USDC` | `0` | Min creator buy in USDC when `CHECK_DEV_BUY=true` |
+| `MAX_DEV_BUY_AMOUNT_USDC` | `500` | Max creator buy in USDC; empty = no cap |
+
+USDC pairs use Pump.fun **`buy_v2` / `sell_v2`** (via `@pump-fun/pump-sdk`). SOL pairs continue to use the legacy `buy` / `sell` path for maximum compatibility.
+
 ### Trading
 
 | Variable | Default (example) | Description |
 |----------|-------------------|-------------|
 | `SIMULATION_MODE` | `true` | `true` = detect and log only; `false` = send buy/sell |
-| `BUY_AMOUNT` | `0.005` | SOL spent per snipe |
+| `BUY_AMOUNT` | `0.005` | SOL spent per SOL-pool snipe |
 | `SLIPPAGE` | `100` | Slippage in **percent** (100 = 100%) applied to max SOL on buy |
 | `TAKE_PROFIT` | `20` | Exit when sell quote ≥ `BUY_AMOUNT × (100 + TAKE_PROFIT) / 100` SOL |
 | `STOP_LOSS` | `10` | Exit when sell quote ≤ `BUY_AMOUNT × (100 - STOP_LOSS) / 100` SOL |
 | `TIME_OUT` | `60` | Max seconds to wait (market cap monitor or sell monitor) |
 | `CHECK_MARKET_CAP` | `false` | Wait until bonding-curve market cap ≥ `MARKET_CAP` before buying |
-| `MARKET_CAP` | `30` | Target market cap in **SOL** when `CHECK_MARKET_CAP=true` |
+| `MARKET_CAP` | `30` | Target market cap in **SOL** for SOL pools when `CHECK_MARKET_CAP=true` |
 
 ### Dev buy filter
 
