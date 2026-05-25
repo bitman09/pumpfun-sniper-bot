@@ -3,28 +3,66 @@ import {
     Keypair,
     PublicKey,
 } from "@solana/web3.js";
+import { bondingCurvePda } from "@pump-fun/pump-sdk";
+import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 import base58 from "bs58";
 import dotnet from 'dotenv'
 
 import buyToken from "./pumputils/utils/buyToken";
+import { buyTokenQuote, sellTokenQuote } from "./pumputils/utils/pumpSdkTrade";
+import { getQuoteMarketCap, getQuoteSellPrice } from "./pumputils/utils/quotePricing";
 import { Metaplex } from "@metaplex-foundation/js";
 import WebSocket = require("ws");
 import logger from "pretty-pino-loggers";
-import { BLOXROUTE_AUTH_HEADER, BUY_AMOUNT, CHECK_DEV_BUY, CHECK_MARKET_CAP, CHECK_TG, CHECK_WEBSITE, CHECK_X, GEYSER_RPC, MARKET_CAP, MAX_DEV_BUY_AMOUNT, MIN_DEV_BUY_AMOUNT, PRIVATE_KEY, RPC_ENDPOINT, RPC_WEBSOCKET_ENDPOINT, SIMULATION_MODE, SLIPPAGE, STOP_LOSS, TAKE_PROFIT, TIME_OUT } from "./constants";
-import { extractAccountPubkeys, parseDevBuyFromInnerInstructions, parseTokenProgramFromInnerInstructions, saveToJSONFile } from "./utils";
-import { getPumpQuote } from "./pumputils/bloxutils";
+import {
+    BUY_AMOUNT,
+    BUY_AMOUNT_USDC,
+    CHECK_DEV_BUY,
+    CHECK_MARKET_CAP,
+    CHECK_TG,
+    CHECK_WEBSITE,
+    CHECK_X,
+    GEYSER_RPC,
+    MAX_DEV_BUY_AMOUNT,
+    MAX_DEV_BUY_AMOUNT_USDC,
+    MIN_DEV_BUY_AMOUNT,
+    MIN_DEV_BUY_AMOUNT_USDC,
+    PRIVATE_KEY,
+    RPC_ENDPOINT,
+    RPC_WEBSOCKET_ENDPOINT,
+    SIMULATION_MODE,
+    SLIPPAGE,
+    SNIPE_QUOTE_MODE,
+    STOP_LOSS,
+    TAKE_PROFIT,
+    TIME_OUT,
+    USDC_MINT,
+} from "./constants";
+import { extractAccountPubkeys, parseDevBuyFromInnerInstructions, parseTokenProgramFromInnerInstructions } from "./utils";
 import { getSellPrice } from "./pumputils/utils/getSellPrice";
-import { getMC } from "./pumputils/utils/getMarketCapSol";
 import sellToken from "./pumputils/utils/sellToken";
 import { getUserTokenBalanceRaw } from "./pumputils/utils/getUserTokenBalance";
-
+import {
+    QuoteKind,
+    detectQuoteKindFromAccounts,
+    getBuyAmountForQuote,
+    getEnabledQuoteKinds,
+    getMarketCapThresholdForQuote,
+    getStopLossThreshold,
+    getTakeProfitThreshold,
+    quoteLabel,
+    shouldSnipeQuote,
+} from "./quote/quoteKind";
 dotnet.config();
 
 const ws = new WebSocket(GEYSER_RPC);
 const connection = new Connection(RPC_ENDPOINT, { wsEndpoint: RPC_WEBSOCKET_ENDPOINT, commitment: "processed" });
 const payerKeypair = Keypair.fromSecretKey(base58.decode(PRIVATE_KEY))
-const TP = BUY_AMOUNT * (100 + TAKE_PROFIT) / 100;
-const LS = BUY_AMOUNT * (100 - STOP_LOSS) / 100;
+const enabledQuoteKinds = getEnabledQuoteKinds();
+
+const isLaunchLog = (log: string) =>
+    log.includes('Program log: Instruction: InitializeMint2') ||
+    log.includes('Program log: Instruction: CreateV2');
 
 const withGaser = () => {
 
@@ -56,7 +94,7 @@ const withGaser = () => {
 
     ws.on('open', function open() {
         console.log('WebSocket is open');
-        sendRequest(ws);  // Send a request once the WebSocket is open
+        sendRequest(ws);
     });
 
     ws.on('message', async function incoming(data) {
@@ -66,50 +104,65 @@ const withGaser = () => {
 
             const result = messageObj.params.result;
             const logs = result.transaction.meta.logMessages;
-            const signature = result.signature; // Extract the signature
+            const signature = result.signature;
             const accountKeys = extractAccountPubkeys(result.transaction.transaction.message.accountKeys);
             const instructions = result.transaction.meta.innerInstructions;
 
-            if (logs && logs.some((log: string | string[]) => log.includes('Program log: Instruction: InitializeMint2'))) {
+            if (logs && logs.some((log: string | string[]) => isLaunchLog(String(log)))) {
                 if (isbuying) return
                 isbuying = true;
 
-                // if (positionCount >= POSITION_NUMBER) return
-                positionCount ++;
+                positionCount++;
 
                 const firstTime = Date.now();
 
                 const dev = accountKeys[0];
                 const mint = accountKeys[1];
-                const bondingCurve = accountKeys[2];
-                const bondingCurveAta = accountKeys[3];
+                const mintPubKey = new PublicKey(mint);
 
-                console.log("New signature => ", `https://solscan.io/tx/${signature}`);
+                const quoteKind = detectQuoteKindFromAccounts(accountKeys);
 
-                console.log('New token => ', `https://solscan.io/token/${mint}`)
-
-                const { buySolAmount, buyTokenAmount } = parseDevBuyFromInnerInstructions(
-                    instructions,
-                    dev,
-                    bondingCurve,
-                    bondingCurveAta
-                );
-
-                console.log("Buy Sol Amount => ", buySolAmount);
-                console.log("Buy Token Amount => ", buyTokenAmount);
-
-                if (!buySolAmount || !buyTokenAmount || !Number.isFinite(buyTokenAmount)) {
+                if (!shouldSnipeQuote(quoteKind, enabledQuoteKinds)) {
+                    console.log(`Skipping ${quoteLabel(quoteKind)} pool (SNIPE_QUOTE_MODE=${SNIPE_QUOTE_MODE})`);
                     isbuying = false;
                     return;
                 }
 
-                // const slot = await connection.getSlot();
-                // console.log("Current slot => ", slot)
-                // saveToJSONFile(result)
+                const bondingCurvePub = bondingCurvePda(mintPubKey);
+                const baseBondingCurveAta = getAssociatedTokenAddressSync(
+                    mintPubKey,
+                    bondingCurvePub,
+                    true,
+                    TOKEN_2022_PROGRAM_ID
+                ).toBase58();
+                const buyAmountUi = getBuyAmountForQuote(quoteKind);
+                const tp = getTakeProfitThreshold(buyAmountUi, TAKE_PROFIT);
+                const ls = getStopLossThreshold(buyAmountUi, STOP_LOSS);
+                const mcapThreshold = getMarketCapThresholdForQuote(quoteKind);
+
+                console.log("New signature => ", `https://solscan.io/tx/${signature}`);
+                console.log('New token => ', `https://solscan.io/token/${mint}`)
+                console.log(`Quote pool => ${quoteLabel(quoteKind)}`);
+
+                const { buyQuoteAmount, buyTokenAmount } = parseDevBuyFromInnerInstructions(
+                    instructions,
+                    dev,
+                    bondingCurvePub.toBase58(),
+                    baseBondingCurveAta,
+                    accountKeys
+                );
+
+                console.log(`Dev buy (${quoteLabel(quoteKind)}) =>`, buyQuoteAmount);
+                console.log("Buy Token Amount => ", buyTokenAmount);
+
+                if (!buyQuoteAmount || !buyTokenAmount || !Number.isFinite(buyTokenAmount)) {
+                    isbuying = false;
+                    return;
+                }
+
                 const devPub = new PublicKey(dev);
-                const mintPub = new PublicKey(mint);
-                const bondingCurvePub = new PublicKey(bondingCurve);
-                const bondingCurveAtaPub = new PublicKey(bondingCurveAta);
+                const mintPub = mintPubKey;
+                const bondingCurveAtaPub = new PublicKey(baseBondingCurveAta);
                 const tokenProgram = parseTokenProgramFromInnerInstructions(instructions);
 
                 if (CHECK_X || CHECK_WEBSITE || CHECK_TG) {
@@ -144,13 +197,17 @@ const withGaser = () => {
                 }
 
                 if (CHECK_DEV_BUY) {
-                    if (buySolAmount < MIN_DEV_BUY_AMOUNT) {
-                        console.log(`Dev buy ${buySolAmount} SOL is below minimum ${MIN_DEV_BUY_AMOUNT} SOL — skipping`);
+                    const minDev = quoteKind === 'usdc' ? MIN_DEV_BUY_AMOUNT_USDC : MIN_DEV_BUY_AMOUNT;
+                    const maxDev = quoteKind === 'usdc' ? MAX_DEV_BUY_AMOUNT_USDC : MAX_DEV_BUY_AMOUNT;
+                    const unit = quoteLabel(quoteKind);
+
+                    if (buyQuoteAmount < minDev) {
+                        console.log(`Dev buy ${buyQuoteAmount} ${unit} is below minimum ${minDev} ${unit} — skipping`);
                         isbuying = false;
                         return;
                     }
-                    if (Number.isFinite(MAX_DEV_BUY_AMOUNT) && buySolAmount > MAX_DEV_BUY_AMOUNT) {
-                        console.log(`Dev buy ${buySolAmount} SOL is above maximum ${MAX_DEV_BUY_AMOUNT} SOL — skipping`);
+                    if (Number.isFinite(maxDev) && buyQuoteAmount > maxDev) {
+                        console.log(`Dev buy ${buyQuoteAmount} ${unit} is above maximum ${maxDev} ${unit} — skipping`);
                         isbuying = false;
                         return;
                     }
@@ -159,11 +216,14 @@ const withGaser = () => {
                 let isMarketChecking = false;
 
                 if (CHECK_MARKET_CAP) {
-                    const isMarketCap = await monitorMarketCap(bondingCurvePub);
+                    const isMarketCap = await monitorMarketCap(mintPub, quoteKind, mcapThreshold);
                     if (isMarketCap) {
                         console.log("Get Market Cap!")
                         isMarketChecking = true;
-                    } else return
+                    } else {
+                        isbuying = false;
+                        return;
+                    }
                 }
 
                 console.log("Moving to Buy");
@@ -173,13 +233,38 @@ const withGaser = () => {
                 if ((isMarketChecking && CHECK_MARKET_CAP) || !CHECK_MARKET_CAP) {
                     if (SIMULATION_MODE) {
                         console.log("SIMULATION_MODE=true: real transactions are disabled.");
-                        console.log("Detected token that matches your filters. No buy/sell transaction will be sent.");
+                        console.log(`Detected ${quoteLabel(quoteKind)} pool token that matches your filters. No buy/sell transaction will be sent.`);
                         console.log("Detection latency (ms):", Date.now() - firstTime);
                         isbuying = false;
                     } else {
                         console.log("Going to Buy!", Date.now() - firstTime);
-                        const { blockhash } = await connection.getLatestBlockhash("processed");
-                        const sig = await buyToken(devPub, mintPub, connection, payerKeypair, BUY_AMOUNT, SLIPPAGE, bondingCurvePub, bondingCurveAtaPub, blockhash, tokenProgram);
+
+                        let sig: { sig: string; tokenAmount: string | number } | false = false;
+
+                        if (quoteKind === 'usdc') {
+                            sig = await buyTokenQuote(
+                                mintPub,
+                                connection,
+                                payerKeypair,
+                                buyAmountUi,
+                                quoteKind
+                            );
+                        } else {
+                            const { blockhash } = await connection.getLatestBlockhash("processed");
+                            sig = await buyToken(
+                                devPub,
+                                mintPub,
+                                connection,
+                                payerKeypair,
+                                buyAmountUi,
+                                SLIPPAGE,
+                                bondingCurvePub,
+                                bondingCurveAtaPub,
+                                blockhash,
+                                tokenProgram
+                            );
+                        }
+
                         if (!sig) {
                             console.log("Transaction failed!");
                             isbuying = false;
@@ -189,21 +274,41 @@ const withGaser = () => {
                                 mintPub,
                                 bondingCurvePub,
                                 payerKeypair.publicKey,
-                                tokenProgram
+                                tokenProgram,
+                                quoteKind,
+                                tp,
+                                ls
                             );
                             if (sellResult) {
-                                const blockhash = (await connection.getLatestBlockhash()).blockhash;
-                                const sellSig = await sellToken(
-                                    devPub,
-                                    mintPub,
-                                    connection,
-                                    payerKeypair,
-                                    sig.tokenAmount,
-                                    bondingCurvePub,
-                                    bondingCurveAtaPub,
-                                    blockhash,
-                                    tokenProgram
-                                );
+                                let sellSig: string | false = false;
+                                if (quoteKind === 'usdc') {
+                                    const balanceRaw = await getUserTokenBalanceRaw(
+                                        connection,
+                                        mintPub,
+                                        payerKeypair.publicKey,
+                                        tokenProgram
+                                    );
+                                    sellSig = await sellTokenQuote(
+                                        mintPub,
+                                        connection,
+                                        payerKeypair,
+                                        balanceRaw > 0n ? balanceRaw : BigInt(String(sig.tokenAmount)),
+                                        quoteKind
+                                    );
+                                } else {
+                                    const blockhash = (await connection.getLatestBlockhash()).blockhash;
+                                    sellSig = await sellToken(
+                                        devPub,
+                                        mintPub,
+                                        connection,
+                                        payerKeypair,
+                                        sig.tokenAmount,
+                                        bondingCurvePub,
+                                        bondingCurveAtaPub,
+                                        blockhash,
+                                        tokenProgram
+                                    );
+                                }
                                 if (sellSig) {
                                     console.log("Sell Success: ", `https://solscan.io/tx/${sellSig}\n`);
                                 } else {
@@ -213,10 +318,12 @@ const withGaser = () => {
                             isbuying = false;
                         }
                     }
+                } else {
+                    isbuying = false;
                 }
             }
         } catch (e) {
-
+            isbuying = false;
         }
     });
 }
@@ -225,84 +332,110 @@ const monitorSellPosition = async (
     mint: PublicKey,
     bondingCurvePub: PublicKey,
     owner: PublicKey,
-    tokenProgram: PublicKey
+    tokenProgram: PublicKey,
+    quoteKind: QuoteKind,
+    tp: number,
+    ls: number
 ): Promise<number> => {
-    console.log("Monitoring token price");
+    console.log(`Monitoring token price (${quoteLabel(quoteKind)})`);
     let totalTime = 0;
-    return new Promise((resolve) => {
-        const monitor = setInterval(async () => {
-            const balanceRaw = await getUserTokenBalanceRaw(
-                connection,
-                mint,
-                owner,
-                tokenProgram,
-                3,
-                100
-            );
-            if (balanceRaw <= 0n) {
-                console.log("No token balance left — stopping monitor");
-                clearInterval(monitor);
-                resolve(0);
-                return;
-            }
-            const outAmount = await getSellPrice(
-                connection,
-                bondingCurvePub,
-                SLIPPAGE,
-                balanceRaw.toString()
-            );
-            console.log("Output sol", outAmount)
-            if (Number(outAmount) >= TP) {
-                console.log("Take Profit Point! Going to sell", outAmount);
-                clearInterval(monitor);
-                resolve(outAmount)
-            } else if (Number(outAmount) <= LS) {
-                console.log("Stop Loss Point! Going to sell", outAmount);
-                clearInterval(monitor);
-                resolve(outAmount)
-            }
-            totalTime += 500;
-            if ((totalTime / 1000) >= TIME_OUT) {
-                console.log("Time Out! Going to sell!")
-                clearInterval(monitor);
-                resolve(outAmount)
-            }
-        }, 500);
-    })
-}
+    const unit = quoteLabel(quoteKind);
 
-const monitorMarketCap = (bondingCurvePub: PublicKey): Promise<boolean> => {
-    console.log("Monitoring MarketCap...")
-    let totalTime = 0;
     return new Promise((resolve) => {
         const monitor = setInterval(async () => {
-            const mc = await getMC(connection, bondingCurvePub);
-            console.log("🚀 Current Market Cap Sol:", mc)
-            if (mc >= MARKET_CAP) {
-                clearInterval(monitor);
-                resolve(true); // Resolve the promise when the market cap condition is met
-            }
-            totalTime += 500;
-            if ((totalTime / 1000) >= TIME_OUT) {
-                console.log("Time Out! Going to skip this token!")
-                clearInterval(monitor);
-                resolve(false);
+            try {
+                const balanceRaw = await getUserTokenBalanceRaw(
+                    connection,
+                    mint,
+                    owner,
+                    tokenProgram,
+                    3,
+                    100
+                );
+                if (balanceRaw <= 0n) {
+                    console.log("No token balance left — stopping monitor");
+                    clearInterval(monitor);
+                    resolve(0);
+                    return;
+                }
+
+                let outAmount: number;
+                if (quoteKind === 'usdc') {
+                    const quote = await getQuoteSellPrice(connection, mint, balanceRaw);
+                    outAmount = quote.outAmount;
+                } else {
+                    outAmount = await getSellPrice(
+                        connection,
+                        bondingCurvePub,
+                        SLIPPAGE,
+                        balanceRaw.toString()
+                    );
+                }
+
+                console.log(`Output ${unit}`, outAmount);
+                if (Number(outAmount) >= tp) {
+                    console.log(`Take Profit Point! Going to sell ${outAmount} ${unit}`);
+                    clearInterval(monitor);
+                    resolve(outAmount);
+                } else if (Number(outAmount) <= ls) {
+                    console.log(`Stop Loss Point! Going to sell ${outAmount} ${unit}`);
+                    clearInterval(monitor);
+                    resolve(outAmount);
+                }
+                totalTime += 500;
+                if ((totalTime / 1000) >= TIME_OUT) {
+                    console.log("Time Out! Going to sell!");
+                    clearInterval(monitor);
+                    resolve(outAmount);
+                }
+            } catch (err) {
+                console.error("monitorSellPosition error:", err);
             }
         }, 500);
     });
-}
+};
+
+const monitorMarketCap = (
+    mint: PublicKey,
+    quoteKind: QuoteKind,
+    threshold: number
+): Promise<boolean> => {
+    console.log(`Monitoring MarketCap (${quoteLabel(quoteKind)})...`);
+    let totalTime = 0;
+    const unit = quoteLabel(quoteKind);
+
+    return new Promise((resolve) => {
+        const monitor = setInterval(async () => {
+            try {
+                const { mc } = await getQuoteMarketCap(connection, mint);
+                console.log(`🚀 Current Market Cap ${unit}:`, mc);
+                if (mc >= threshold) {
+                    clearInterval(monitor);
+                    resolve(true);
+                }
+                totalTime += 500;
+                if ((totalTime / 1000) >= TIME_OUT) {
+                    console.log("Time Out! Going to skip this token!");
+                    clearInterval(monitor);
+                    resolve(false);
+                }
+            } catch (err) {
+                console.error("monitorMarketCap error:", err);
+            }
+        }, 500);
+    });
+};
 
 const getTokenMetadata = async (mintAddress: string, connection: Connection, retries: number = 5, delay: number = 100): Promise<any> => {
     const metaplex = Metaplex.make(connection);
     const mintPublicKey = new PublicKey(mintAddress);
 
-    // Helper function for delay
     const delayFunction = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
             const nft = await metaplex.nfts().findByMint({ mintAddress: mintPublicKey });
-            return nft.json;  // Returns the token's ticker/symbol
+            return nft.json;
         } catch (error) {
             if (attempt < retries) {
                 await delayFunction(delay);
@@ -317,9 +450,15 @@ const getTokenMetadata = async (mintAddress: string, connection: Connection, ret
 const runBot = () => {
     console.log('--------------- Geyser mode is running! ---------------\n');
     console.log(`SIMULATION_MODE => ${SIMULATION_MODE} (${SIMULATION_MODE ? 'no real buys/sells' : 'live trading enabled'})`);
+    console.log(`SNIPE_QUOTE_MODE => ${SNIPE_QUOTE_MODE} (enabled: ${[...enabledQuoteKinds].join(', ')})`);
+    console.log(`SOL buy amount => ${BUY_AMOUNT} SOL | USDC buy amount => ${BUY_AMOUNT_USDC} USDC`);
+    console.log(`USDC mint => ${USDC_MINT.toBase58()}`);
     if (CHECK_DEV_BUY) {
-        const maxLabel = Number.isFinite(MAX_DEV_BUY_AMOUNT) ? `${MAX_DEV_BUY_AMOUNT} SOL` : 'infinity (unset)';
-        console.log(`CHECK_DEV_BUY => true, allowed dev buy range: ${MIN_DEV_BUY_AMOUNT} – ${maxLabel}`);
+        const maxSol = Number.isFinite(MAX_DEV_BUY_AMOUNT) ? `${MAX_DEV_BUY_AMOUNT} SOL` : 'infinity';
+        const maxUsdc = Number.isFinite(MAX_DEV_BUY_AMOUNT_USDC) ? `${MAX_DEV_BUY_AMOUNT_USDC} USDC` : 'infinity';
+        console.log(`CHECK_DEV_BUY => true`);
+        console.log(`  SOL dev buy range: ${MIN_DEV_BUY_AMOUNT} – ${maxSol}`);
+        console.log(`  USDC dev buy range: ${MIN_DEV_BUY_AMOUNT_USDC} – ${maxUsdc}`);
     } else {
         console.log(`CHECK_DEV_BUY => false (dev buy min/max ignored)`);
     }
